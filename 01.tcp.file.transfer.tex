@@ -1,0 +1,149 @@
+\documentclass[12pt, letterpaper]{article}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\title{Practical 1 Report - File Transfer over TCP/IP in CLI}
+\author{Nguyen Pham Truong An - 23BI14004}
+\date{20 November, 2025}
+
+
+\begin{document}
+
+\maketitle
+
+\section{Protocol Design}
+
+\subsection{Message Protocol Framework}
+The system uses a framed protocol to separate messages into chatting messages and file transfers, preventing stream corruption.
+
+\begin{verbatim}
+    +-------------------------------------------+
+    |          PROTOCOL STRUCTURE               |
+    +-------------------------------------------+
+    | CHAT Protocol:                            |
+    | +---------+---------------------+         |
+    | | "CHAT"  |   Message Text      |         |
+    | +---------+---------------------+         |
+    | FILE Protocol:                            |
+    | +---------+----------+---------+----------+
+    | | "FILE"  | filename | filesize| filedata |
+    | +---------+----------+---------+----------+
+    | QUIT Protocol:                            |
+    | | +---------+                             |
+    | | "QUIT"    |                             |
+    | | +---------+                             |
+    +-------------------------------------------+
+\end{verbatim}
+
+\textbf{Protocol Types:}
+\begin{itemize}
+    \item \texttt{CHAT} - Text message: \texttt{CHAT + message}
+    \item \texttt{FILE} - File transfer: \texttt{FILE + filename + filesize + filedata}
+    \item \texttt{QUIT} - Client disconnection: \texttt{QUIT}
+\end{itemize}
+
+\section{System Architecture}
+
+\subsection{Client-Server Organization}
+The system follows a multi-threaded client-server model.
+
+\begin{verbatim}
+    +---------------------------------------+
+    |              SERVER                   |
+    +---------------------------------------+
+    |  ServerSocket (Port 8080)             |
+    |        |                              |
+    |        v                              |
+    |  +------------+                       |
+    |  | Client 1   | -- Thread 1           |
+    |  +------------+                       |
+    |  +------------+                       |
+    |  | Client 2   | -- Thread 2           |
+    |  +------------+                       |
+    |  +------------+                       |
+    |  | Client N   | -- Thread N           |
+    |  +------------+                       |
+    |                                       |
+    |  Broadcast to All Clients             |
+    +---------------------------------------+
+    
+    +---------------------------------------+
+    |              CLIENT                   |
+    +---------------------------------------+
+    |  Socket -> Server                     |
+    |        |                              |
+    |        v                              |
+    |  +----------------+                   |
+    |  | Input Thread   | <- User Messages  |
+    |  +----------------+                   |
+    |  +----------------+                   |
+    |  | Output Thread  | -> Server Msgs    |
+    |  +----------------+                   |
+    +---------------------------------------+
+\end{verbatim}
+
+\textbf{Key Components:}
+\begin{itemize}
+    \item \textbf{Server}: Manages client connections, broadcasts messages, handles file storage
+    \item \textbf{Client}: Sends messages/files, receives broadcasts, has separate I/O threads
+    \item \textbf{Thread Management}: Each client runs in separate thread with synchronized data structures
+\end{itemize}
+
+\section{File Transfer Implementation}
+
+\subsection{Core File Transfer Code}
+The file transfer uses \texttt{DataInputStream} and \texttt{DataOutputStream} for proper protocol framing.
+
+\begin{lstlisting}[language=Java,caption=File Transfer Implementation,label=code:filetransfer]
+// Client-side file sending
+private static void sendFile(String filename, DataOutputStream dataOut) {
+    File file = new File(filename);
+    
+    // Send file protocol header
+    dataOut.writeUTF("FILE");
+    dataOut.writeUTF(file.getName());
+    dataOut.writeLong(file.length());
+    dataOut.flush();
+    
+    // Stream file data in chunks
+    FileInputStream fileIn = new FileInputStream(file);
+    byte[] buffer = new byte[4096];
+    int bytesRead;
+    
+    while ((bytesRead = fileIn.read(buffer)) != -1) {
+        dataOut.write(buffer, 0, bytesRead);
+    }
+    dataOut.flush();
+    fileIn.close();
+}
+
+// Server-side file receiving  
+private static void handleFileTransfer(DataInputStream dataIn) {
+    // Read file metadata
+    String filename = dataIn.readUTF();
+    long fileSize = dataIn.readLong();
+    
+    // Receive exact file size
+    FileOutputStream fileOut = new FileOutputStream(filename);
+    byte[] buffer = new byte[4096];
+    long bytesReceived = 0;
+    int bytesRead;
+    
+    while (bytesReceived < fileSize && 
+           (bytesRead = dataIn.read(buffer)) != -1) {
+        fileOut.write(buffer, 0, bytesRead);
+        bytesReceived += bytesRead;
+    }
+    fileOut.close();
+}
+\end{lstlisting}
+
+\subsection{Key Features}
+\begin{itemize}
+    \item \textbf{Protocol Framing}: Clear separation between text and binary data
+    \item \textbf{Size Tracking}: Prevents over-reading using file size headers
+    \item \textbf{Stream Integrity}: Maintains binary data integrity across socket
+    \item \textbf{Error Handling}: Proper resource management and exception handling
+\end{itemize}
+
+\end{document}
