@@ -9,6 +9,7 @@ Students are expected to:
 Student Info
 =========================
 
-* Student Name: Nguyen Pham Truong An
+* Student Name: Nguyen Pham Truong An (Leader)
 * Student ID: 23BI14004
-* Student Group ID: TBA
+* Student Group ID: 12
+* Midterm Topic ID: 9
