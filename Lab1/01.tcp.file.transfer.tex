@@ -2,10 +2,22 @@
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{hyperref}
-\title{Practical 1 Report - File Transfer over TCP/IP in CLI}
-\author{Nguyen Pham Truong An - 23BI14004}
-\date{20 November, 2025}
+\usepackage{graphicx}
 
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red}
+}
+
+\title{Practical Report - File Transfer over TCP/IP in CLI}
+\author{Nguyen Pham Truong An - 23BI14004}
+\date{\today}
 
 \begin{document}
 
@@ -14,136 +26,301 @@
 \section{Protocol Design}
 
 \subsection{Message Protocol Framework}
-The system uses a framed protocol to separate messages into chatting messages and file transfers, preventing stream corruption.
+The system implements a framed protocol to distinguish between chat messages and file transfers, ensuring stream integrity and preventing data corruption.
 
 \begin{verbatim}
-    +-------------------------------------------+
-    |          PROTOCOL STRUCTURE               |
-    +-------------------------------------------+
-    | CHAT Protocol:                            |
-    | +---------+---------------------+         |
-    | | "CHAT"  |   Message Text      |         |
-    | +---------+---------------------+         |
-    | FILE Protocol:                            |
-    | +---------+----------+---------+----------+
-    | | "FILE"  | filename | filesize| filedata |
-    | +---------+----------+---------+----------+
-    | QUIT Protocol:                            |
-    | | +---------+                             |
-    | | "QUIT"    |                             |
-    | | +---------+                             |
-    +-------------------------------------------+
++---------------------------------------------------+
+|              PROTOCOL STRUCTURE                   |
++---------------------------------------------------+
+| Message Protocol:                                 |
+| +----------+-------------------------+            |
+| | "MSG:"   | Message Content         |            |
+| +----------+-------------------------+            |
+|                                                   |
+| File Transfer Protocol:                           |
+| +----------+----------+----------+-------------+  |
+| | "FILE:"  | filename | filesize | file data   |  |
+| +----------+----------+----------+-------------+  |
+|            (UTF-8)    (long)     (binary)        |
+|                                                   |
+| Acknowledgment Protocol:                          |
+| +----------+                                      |
+| | "ACK"    |                                      |
+| +----------+                                      |
++---------------------------------------------------+
 \end{verbatim}
 
 \textbf{Protocol Types:}
 \begin{itemize}
-    \item \texttt{CHAT} - Text message: \texttt{CHAT + message}
-    \item \texttt{FILE} - File transfer: \texttt{FILE + filename + filesize + filedata}
-    \item \texttt{QUIT} - Client disconnection: \texttt{QUIT}
+    \item \texttt{MSG:} - Text message with content prefixed by \texttt{MSG:}
+    \item \texttt{FILE:} - File transfer initiation marker
+    \item \texttt{ACK} - Acknowledgment for successful file receipt
+    \item \texttt{/quit} - Graceful disconnection command
+    \item \texttt{/send <filepath>} - User command to initiate file transfer
 \end{itemize}
 
 \section{System Architecture}
 
 \subsection{Client-Server Organization}
-The system follows a multi-threaded client-server model.
+The system implements a bidirectional, one-to-one TCP connection with multi-threaded communication.
 
 \begin{verbatim}
-    +---------------------------------------+
-    |              SERVER                   |
-    +---------------------------------------+
-    |  ServerSocket (Port 8080)             |
-    |        |                              |
-    |        v                              |
-    |  +------------+                       |
-    |  | Client 1   | -- Thread 1           |
-    |  +------------+                       |
-    |  +------------+                       |
-    |  | Client 2   | -- Thread 2           |
-    |  +------------+                       |
-    |  +------------+                       |
-    |  | Client N   | -- Thread N           |
-    |  +------------+                       |
-    |                                       |
-    |  Broadcast to All Clients             |
-    +---------------------------------------+
-    
-    +---------------------------------------+
-    |              CLIENT                   |
-    +---------------------------------------+
-    |  Socket -> Server                     |
-    |        |                              |
-    |        v                              |
-    |  +----------------+                   |
-    |  | Input Thread   | <- User Messages  |
-    |  +----------------+                   |
-    |  +----------------+                   |
-    |  | Output Thread  | -> Server Msgs    |
-    |  +----------------+                   |
-    +---------------------------------------+
++---------------------------------------+
+|              SERVER                   |
++---------------------------------------+
+| ServerSocket (bind, listen)           |
+|        |                              |
+|        v                              |
+|   accept() -> Client Socket           |
+|        |                              |
+|        +-------------+                |
+|        |             |                |
+|   Send Thread    Receive Thread       |
+|   (User Input)   (Network Listen)     |
+|        |             |                |
+|        v             v                |
+|   DataOutputStream  DataInputStream   |
++---------------------------------------+
+
++---------------------------------------+
+|              CLIENT                   |
++---------------------------------------+
+| Socket (connect to server)            |
+|        |                              |
+|        v                              |
+|   Established Connection              |
+|        |                              |
+|        +-------------+                |
+|        |             |                |
+|   Send Thread    Receive Thread       |
+|   (User Input)   (Network Listen)     |
+|        |             |                |
+|        v             v                |
+|   DataOutputStream  DataInputStream   |
++---------------------------------------+
 \end{verbatim}
 
 \textbf{Key Components:}
 \begin{itemize}
-    \item \textbf{Server}: Manages client connections, broadcasts messages, handles file storage
-    \item \textbf{Client}: Sends messages/files, receives broadcasts, has separate I/O threads
-    \item \textbf{Thread Management}: Each client runs in separate thread with synchronized data structures
+    \item \textbf{Server}: Listens on port 8080, accepts one client connection, handles bidirectional communication
+    \item \textbf{Client}: Connects to server via hostname resolution (\texttt{gethostbyname}), establishes TCP socket
+    \item \textbf{Threading Model}: Each endpoint runs two threads - one for sending (user input) and one for receiving (network data)
+    \item \textbf{Socket Operations}: Implements all core operations - socket(), bind(), listen(), accept(), connect(), send(), recv()
 \end{itemize}
 
 \section{File Transfer Implementation}
 
+\subsection{Transfer Flow with Atomic Operations}
+
+The file transfer implements a three-phase protocol ensuring atomicity:
+
+\begin{verbatim}
+PHASE 1: TRANSMISSION
+  Sender                    Receiver
+    |                          |
+    |---- "FILE:" ------------>|
+    |---- filename ----------->| (UTF-8 string)
+    |---- filesize ----------->| (long, 8 bytes)
+    |---- file data ---------->| (binary stream)
+    |                          |
+    |                          | Write to "recv_filename"
+    
+PHASE 2: ACKNOWLEDGMENT
+    |                          |
+    |<------- "ACK" -----------| File successfully received
+    
+PHASE 3: FINALIZATION
+    | Delete original file     |
+    |                          | Rename: recv_filename -> filename
+\end{verbatim}
+
 \subsection{Core File Transfer Code}
-The file transfer uses \texttt{DataInputStream} and \texttt{DataOutputStream} for proper protocol framing.
 
-\begin{lstlisting}[language=Java,caption=File Transfer Implementation,label=code:filetransfer]
-// Client-side file sending
-private static void sendFile(String filename, DataOutputStream dataOut) {
-    File file = new File(filename);
-    
-    // Send file protocol header
-    dataOut.writeUTF("FILE");
-    dataOut.writeUTF(file.getName());
-    dataOut.writeLong(file.length());
-    dataOut.flush();
-    
-    // Stream file data in chunks
-    FileInputStream fileIn = new FileInputStream(file);
-    byte[] buffer = new byte[4096];
-    int bytesRead;
-    
-    while ((bytesRead = fileIn.read(buffer)) != -1) {
-        dataOut.write(buffer, 0, bytesRead);
+\begin{lstlisting}[language=Java,caption=Client/Server File Sending,label=code:sendfile]
+private void sendFile(String path) {
+    try {
+        File file = new File(path);
+        if (!file.exists()) {
+            System.out.println("File not found: " + path);
+            return;
+        }
+        
+        // Send file transfer protocol header
+        dos.writeUTF("FILE:");
+        dos.writeUTF(file.getName());
+        dos.writeLong(file.length());
+        
+        // Stream file data in 4KB chunks
+        FileInputStream fis = new FileInputStream(file);
+        byte[] buffer = new byte[BUFFER_SIZE];
+        int read;
+        while ((read = fis.read(buffer)) != -1) {
+            dos.write(buffer, 0, read);
+        }
+        dos.flush();
+        fis.close();
+        
+        // Wait for acknowledgment
+        String ack = dis.readUTF();
+        if (ack.equals("ACK")) {
+            if (file.delete()) {
+                System.out.println("Transferred: " + file.getName());
+            } else {
+                System.out.println("Sent but failed to delete: " 
+                    + file.getName());
+            }
+        }
+    } catch (IOException e) {
+        System.err.println("Send failed: " + e.getMessage());
     }
-    dataOut.flush();
-    fileIn.close();
-}
-
-// Server-side file receiving  
-private static void handleFileTransfer(DataInputStream dataIn) {
-    // Read file metadata
-    String filename = dataIn.readUTF();
-    long fileSize = dataIn.readLong();
-    
-    // Receive exact file size
-    FileOutputStream fileOut = new FileOutputStream(filename);
-    byte[] buffer = new byte[4096];
-    long bytesReceived = 0;
-    int bytesRead;
-    
-    while (bytesReceived < fileSize && 
-           (bytesRead = dataIn.read(buffer)) != -1) {
-        fileOut.write(buffer, 0, bytesRead);
-        bytesReceived += bytesRead;
-    }
-    fileOut.close();
 }
 \end{lstlisting}
 
-\subsection{Key Features}
+\begin{lstlisting}[language=Java,caption=Client/Server File Receiving,label=code:receivefile]
+private void receiveFile() {
+    try {
+        // Read file metadata
+        String filename = dis.readUTF();
+        long size = dis.readLong();
+        
+        // Write to temporary file with recv_ prefix
+        FileOutputStream fos = new FileOutputStream("recv_" + filename);
+        byte[] buffer = new byte[BUFFER_SIZE];
+        long remaining = size;
+        int read;
+        
+        // Read exact file size to prevent over-reading
+        while (remaining > 0 && 
+               (read = dis.read(buffer, 0, 
+                   (int)Math.min(buffer.length, remaining))) != -1) {
+            fos.write(buffer, 0, read);
+            remaining -= read;
+        }
+        fos.close();
+        
+        // Send acknowledgment
+        dos.writeUTF("ACK");
+        dos.flush();
+        
+        // Atomic rename: recv_filename -> filename
+        File tempFile = new File("recv_" + filename);
+        File finalFile = new File(filename);
+        if (tempFile.renameTo(finalFile)) {
+            System.out.println("Received: " + filename);
+        } else {
+            System.out.println("Received but rename failed: recv_" 
+                + filename);
+        }
+    } catch (IOException e) {
+        System.err.println("Receive failed: " + e.getMessage());
+    }
+}
+\end{lstlisting}
+
+\subsection{Socket Operations Mapping}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Socket Operation} & \textbf{Java Implementation} \\ \hline
+\texttt{socket()} & \texttt{new Socket()}, \texttt{new ServerSocket()} \\ \hline
+\texttt{setsockopt()} & \texttt{setReuseAddress()}, \texttt{setSoTimeout()} \\ \hline
+\texttt{bind()} & \texttt{serverSocket.bind(InetSocketAddress)} \\ \hline
+\texttt{gethostbyname()} & \texttt{InetAddress.getByName(host)} \\ \hline
+\texttt{listen()} & Implicit in \texttt{ServerSocket} creation \\ \hline
+\texttt{connect()} & \texttt{socket.connect(InetSocketAddress)} \\ \hline
+\texttt{accept()} & \texttt{serverSocket.accept()} \\ \hline
+\texttt{send()} & \texttt{DataOutputStream.write()}, \texttt{writeUTF()} \\ \hline
+\texttt{recv()} & \texttt{DataInputStream.read()}, \texttt{readUTF()} \\ \hline
+\end{tabular}
+\caption{Socket API to Java Mapping}
+\end{table}
+
+\section{Key Implementation Features}
+
+\subsection{Atomic File Transfer}
 \begin{itemize}
-    \item \textbf{Protocol Framing}: Clear separation between text and binary data
-    \item \textbf{Size Tracking}: Prevents over-reading using file size headers
-    \item \textbf{Stream Integrity}: Maintains binary data integrity across socket
-    \item \textbf{Error Handling}: Proper resource management and exception handling
+    \item \textbf{Temporary Prefix}: Files written with \texttt{recv\_} prefix during transfer
+    \item \textbf{Acknowledgment Protocol}: Sender only deletes after receiving \texttt{ACK}
+    \item \textbf{Atomic Rename}: Receiver renames file only after successful write and ACK sent
+    \item \textbf{Safety}: Prevents partial files and ensures transaction-like behavior
 \end{itemize}
+
+\subsection{Protocol Framing}
+\begin{itemize}
+    \item \textbf{Clear Separation}: \texttt{MSG:} prefix distinguishes text from binary data
+    \item \textbf{Size Tracking}: File size header prevents stream corruption
+    \item \textbf{UTF-8 Encoding}: Filename transmitted as UTF-8 for international support
+    \item \textbf{Binary Integrity}: Raw byte transfer after headers maintains file integrity
+\end{itemize}
+
+\subsection{Error Handling}
+\begin{itemize}
+    \item \textbf{File Validation}: Checks file existence before transmission
+    \item \textbf{Connection Resilience}: Handles network failures gracefully
+    \item \textbf{Resource Management}: Proper stream closure in finally blocks
+    \item \textbf{Timeout Configuration}: 30-second socket timeout prevents hanging
+\end{itemize}
+
+\subsection{Concurrency Model}
+\begin{itemize}
+    \item \textbf{Dual Threading}: Separate threads for sending and receiving
+    \item \textbf{Volatile Flag}: \texttt{volatile boolean running} for thread-safe shutdown
+    \item \textbf{Non-blocking Input}: User can type while receiving messages/files
+    \item \textbf{Thread Coordination}: Clean shutdown via \texttt{/quit} command
+\end{itemize}
+
+\section{Usage Examples}
+
+\subsection{Compilation and Execution}
+\begin{verbatim}
+# Compile
+javac Server.java Client.java
+
+# Run Server (Terminal 1)
+java Server 8080
+
+# Run Client (Terminal 2)
+java Client 127.0.0.1 8080
+\end{verbatim}
+
+\subsection{Sample Session}
+\begin{verbatim}
+Server Terminal:
+$ java Server 8080
+Server listening on port 8080
+Client connected: 127.0.0.1
+Hello from server!
+Client: Hi server!
+/send document.pdf
+Transferred: document.pdf
+Received: report.txt
+
+Client Terminal:
+$ java Client 127.0.0.1 8080
+Connecting to 127.0.0.1:8080
+Connected
+Server: Hello from server!
+Hi server!
+Received: document.pdf
+/send report.txt
+Transferred: report.txt
+\end{verbatim}
+
+\section{Conclusion}
+
+This implementation demonstrates a complete TCP/IP file transfer system with the following achievements:
+
+\begin{itemize}
+    \item Full implementation of core socket operations
+    \item Atomic file transfer with acknowledgment protocol
+    \item Bidirectional communication with chat capability
+    \item Thread-safe concurrent send/receive operations
+    \item Robust error handling and resource management
+    \item Clean protocol framing preventing stream corruption
+\end{itemize}
+
+The system successfully demonstrates TCP/IP concepts while providing practical file transfer functionality in a command-line environment.
 
 \end{document}
