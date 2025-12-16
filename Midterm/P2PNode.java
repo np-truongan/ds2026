@@ -5,7 +5,6 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class P2PNode {
-    // --- Configuration ---
     private int myPort;
     private String myIP;
     private final String sharedFolder = "shared_files";
@@ -14,13 +13,12 @@ public class P2PNode {
     private final List<Connection> neighbors = Collections.synchronizedList(new ArrayList<>());
 
     // Routing tables
-    private final Map<String, Connection> routingTable = new ConcurrentHashMap<>();
+    private final Map<String, RouteEntry> routingTable = new ConcurrentHashMap<>();
     private final Set<String> seenQueries = Collections.synchronizedSet(new HashSet<>());
 
     // Background scheduler for Keep-Alives and Timeouts
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
-    // --- Protocol Constants ---
     private static final byte TYPE_HANDSHAKE = 0x01;
     private static final byte TYPE_KEEP_ALIVE = 0x02;
     private static final byte TYPE_QUERY = 0x03;
@@ -44,19 +42,18 @@ public class P2PNode {
 
     public P2PNode(int port) {
         this.myPort = port;
-        this.myIP = getPublicIp(); // <--- FIXED: Smart IP detection
+        this.myIP = getPublicIp();
         new File(sharedFolder).mkdirs();
     }
 
-    // --- NEW: Smart IP Detection ---
     private String getPublicIp() {
-        // Method 1: Ask the OS "If I wanted to reach the internet, which IP would I use?"
-        // This effectively filters out VirtualBox/VMWare adapters that don't have internet access.
+        // Ask the OS "If I wanted to reach the internet, which IP would I use?"
+        // This effectively filters out VirtualBox/VMWare/Radmin adapters that don't have internet access.
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.connect(InetAddress.getByName("8.8.8.8"), 10002);
             return socket.getLocalAddress().getHostAddress();
         } catch (Exception e) {
-            // Method 2: Fallback to manual iteration if offline
+            // Fallback to manual iteration if offline
             try {
                 Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
                 while (interfaces.hasMoreElements()) {
@@ -81,13 +78,10 @@ public class P2PNode {
     }
 
     public void start() {
-        // 1. Start Server Thread
         new Thread(this::listenForConnections).start();
 
-        // 2. Start Peer Maintenance (Pings + Timeouts)
         startPeerMaintenance();
 
-        // 3. Start CLI Loop
         Scanner scanner = new Scanner(System.in);
         System.out.println("=== P2P Node (" + myIP + ":" + myPort + ") ===");
         System.out.println("Commands:");
@@ -157,16 +151,17 @@ public class P2PNode {
         }
     }
 
-    // --- HELPER: Handles Async Notifications ---
     private void asyncLog(String message) {
         System.out.print("\r" + message + "\n> ");
     }
 
-    // --- Keep-Alive & Timeout System ---
     private void startPeerMaintenance() {
         scheduler.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
             byte[] ping = "PING".getBytes(StandardCharsets.UTF_8);
+
+            routingTable.entrySet().removeIf(entry ->
+                    entry.getValue().expiresAt < now);
 
             List<Connection> snapshot;
             synchronized (neighbors) {
@@ -187,8 +182,6 @@ public class P2PNode {
             }
         }, 0, 5000, TimeUnit.MILLISECONDS);
     }
-
-    // --- Networking Logic ---
 
     private void listenForConnections() {
         try (ServerSocket serverSocket = new ServerSocket(myPort)) {
@@ -301,7 +294,6 @@ public class P2PNode {
         }
     }
 
-    // --- Inner Class: Handles One Peer Connection ---
     private class Connection implements Runnable {
         Socket socket;
         DataInputStream dis;
@@ -376,7 +368,8 @@ public class P2PNode {
             if (seenQueries.contains(queryId)) return;
             seenQueries.add(queryId);
 
-            routingTable.put(queryId, this);
+            long expiry = System.currentTimeMillis() + (ttl * 5000L);
+            routingTable.put(queryId, new RouteEntry(this, expiry));
 
             File file = new File(sharedFolder, filename);
             if (file.exists()) {
@@ -404,11 +397,10 @@ public class P2PNode {
             String queryId = parts[0];
 
             if (routingTable.containsKey(queryId)) {
-                Connection source = routingTable.get(queryId);
-                if (source != null) {
-                    source.sendPacket(TYPE_QUERY_HIT, ttl, payload);
+                RouteEntry entry = routingTable.get(queryId);
+                if (entry != null) {
+                    entry.from.sendPacket(TYPE_QUERY_HIT, ttl, payload);
                 }
-                routingTable.remove(queryId);
             } else {
                 asyncLog("\n>>> QUERY HIT! <<<\n" +
                         "File: " + parts[1] + "\n" +
@@ -443,6 +435,16 @@ public class P2PNode {
             } catch (IOException e) {
                 close();
             }
+        }
+    }
+
+     private class RouteEntry {
+        Connection from;
+        long expiresAt;
+
+        RouteEntry(Connection from, long expiresAt) {
+            this.from = from;
+            this.expiresAt = expiresAt;
         }
     }
 }
