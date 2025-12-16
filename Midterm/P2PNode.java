@@ -18,6 +18,7 @@ public class P2PNode {
 
     // Background scheduler for Keep-Alives and Timeouts
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ExecutorService downloadExecutor = Executors.newCachedThreadPool();
 
     private static final byte TYPE_HANDSHAKE = 0x01;
     private static final byte TYPE_KEEP_ALIVE = 0x02;
@@ -243,41 +244,43 @@ public class P2PNode {
         }
     }
 
-    private void initiateDownload(String ip, int port, String filename) {
-        new Thread(() -> {
-            try (Socket socket = new Socket(ip, port);
-                 DataInputStream dis = new DataInputStream(socket.getInputStream());
-                 DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
+    private void initiateDownload(String ip, int port, String filenames) {
+        String[] files = filenames.split(",");
 
-                asyncLog("Requesting " + filename + " from " + ip + ":" + port);
+        for (String f : files) {
+            String filename = f.trim();
+            if (filename.isEmpty()) continue;
 
-                byte[] filenameBytes = filename.getBytes(StandardCharsets.UTF_8);
-                dos.writeInt(filenameBytes.length);
-                dos.writeByte(TYPE_DOWNLOAD_REQ);
-                dos.writeByte(1);
-                dos.write(filenameBytes);
-                dos.flush();
+            downloadExecutor.submit(() -> {
+                try (Socket socket = new Socket(ip, port);
+                     DataInputStream dis = new DataInputStream(socket.getInputStream());
+                     DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
 
-                int len = dis.readInt();
-                byte type = dis.readByte();
-                dis.readByte(); // skip TTL
+                    byte[] nameBytes = filename.getBytes(StandardCharsets.UTF_8);
+                    dos.writeInt(nameBytes.length);
+                    dos.writeByte(TYPE_DOWNLOAD_REQ);
+                    dos.writeByte(1);
+                    dos.write(nameBytes);
+                    dos.flush();
 
-                if (type == TYPE_DOWNLOAD_RES) {
-                    byte[] data = new byte[len];
-                    dis.readFully(data);
+                    int len = dis.readInt();
+                    byte type = dis.readByte();
+                    dis.readByte();
 
-                    File outFile = new File("downloaded_" + filename);
-                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
-                        fos.write(data);
+                    if (type == TYPE_DOWNLOAD_RES) {
+                        byte[] data = new byte[len];
+                        dis.readFully(data);
+
+                        try (FileOutputStream fos =
+                                     new FileOutputStream("downloaded_" + filename)) {
+                            fos.write(data);
+                        }
+                        asyncLog("Download complete: " + filename);
                     }
-                    asyncLog("Download complete: " + outFile.getAbsolutePath());
-                } else {
-                    asyncLog("Unexpected response type: " + type);
+                } catch (IOException e) {
                 }
-            } catch (IOException e) {
-                asyncLog("Download failed: " + e.getMessage());
-            }
-        }).start();
+            });
+        }
     }
 
     private void printNeighbors() {
